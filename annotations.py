@@ -476,15 +476,17 @@ with gr.Blocks(title="FA Manual Annotation Tool") as demo:
     gr.Markdown("### Labels (oui / non / inconnu)")
 
     with gr.Row():
-        fracture_visible = gr.Radio(LABEL_CHOICES, value=None, label="fracture_visible")
-        deplacement_ou_incongruence = gr.Radio(LABEL_CHOICES, value=None, label="deplacement_ou_incongruence")
-        consolidation_ou_reaction_periostee = gr.Radio(LABEL_CHOICES, value=None, label="consolidation_ou_reaction_periostee")
-        materiel_implant = gr.Radio(LABEL_CHOICES, value=None, label="materiel_implant")
-        osteotomie_ou_arthrodese = gr.Radio(LABEL_CHOICES, value=None, label="osteotomie_ou_arthrodese")
+        fracture_visible = gr.Radio(LABEL_CHOICES, value=None, label="fracture", scale=1)
+        deplacement_ou_incongruence = gr.Radio(LABEL_CHOICES, value=None, label="dépl./incong.", scale=1)
+        consolidation_ou_reaction_periostee = gr.Radio(LABEL_CHOICES, value=None, label="consol./périoste", scale=1)
+        materiel_implant = gr.Radio(LABEL_CHOICES, value=None, label="matériel", scale=1)
+        osteotomie_ou_arthrodese = gr.Radio(LABEL_CHOICES, value=None, label="ostéo/arthro", scale=1)
+        btn_save_next = gr.Button("Save & Next", variant="primary", scale=1)
 
-    comment = gr.Textbox(label="Commentaire (optionnel)", lines=1)
-
-    btn_save_next = gr.Button("Save & Next", variant="primary")
+    with gr.Row():
+        comment = gr.Textbox(label="Commentaire (optionnel)", lines=1, scale=6)
+        btn_skip = gr.Button("Skip", scale=1)
+        btn_prev = gr.Button("Prev", scale=1)
 
     # Wiring callbacks
     btn_start.click(
