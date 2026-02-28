@@ -14,13 +14,13 @@ RECURSIVE = False              # True => rglob
 SEED = 12345
 
 # Cibles "souples" (on peut dépasser car patient-wise sans tronquage)
-TARGET_VAL_EXAMS = 100
-TARGET_TEST_EXAMS = 100
+TARGET_VAL_EXAMS = 250
+TARGET_TEST_EXAMS = 250
 
 # Optionnel: plafonds "durs" pour éviter qu’un patient énorme fasse exploser la taille
 # Mets None si tu veux désactiver
-MAX_VAL_EXAMS = 150
-MAX_TEST_EXAMS = 150
+MAX_VAL_EXAMS = TARGET_VAL_EXAMS + 15
+MAX_TEST_EXAMS = TARGET_TEST_EXAMS + 15
 
 OUT_DIR = Path("./splits")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
