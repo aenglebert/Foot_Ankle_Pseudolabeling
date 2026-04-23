@@ -1,44 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-generate_pseudolabels.py
-
-Génère des pseudo-labels (oui/non/inconnu) à partir de rapports .txt via vLLM.
-
-Deux modes :
-1) FULL DATASET (comme actuellement) : on prend tous les .txt dans --input_dir
-2) SUBSET (val/test/train) : on ne traite que les report_id présents dans des CSV de split
-   (ex: splits/val_exams.csv, splits/test_exams.csv), ou dans un CSV fourni.
-
-Exemples :
-
-# 1) Tout le dataset
-python generate_pseudolabels.py \
-  --input_dir ./fa \
-  --output_csv pseudolabels/ministral3_3B_all.csv
-
-# 2) Uniquement val + test à partir du dossier splits/
-python generate_pseudolabels.py \
-  --input_dir ./fa \
-  --output_csv pseudolabels/ministral3_3B_valtest.csv \
-  --splits_dir splits \
-  --use_splits val test
-
-# 3) Uniquement val (utile pour itérer prompt)
-python generate_pseudolabels.py \
-  --input_dir ./fa \
-  --output_csv pseudolabels/ministral3_3B_val.csv \
-  --splits_dir splits \
-  --use_splits val
-
-# 4) Uniquement les report_id d’un CSV arbitraire (doit contenir une colonne report_id)
-python generate_pseudolabels.py \
-  --input_dir ./fa \
-  --output_csv pseudolabels/ministral3_3B_custom.csv \
-  --report_ids_csv splits/val_exams.csv
-"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -46,11 +8,11 @@ import argparse
 import csv
 import re
 import difflib
-from typing import Dict, List, Optional, Sequence, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Any
 
 from vllm import LLM, SamplingParams
 
-# Optionnel: llm_json tolère parfois des "JSON" un peu sales. Sinon on fallback sur json stdlib.
+# Optionnel: llm_json tolère parfois des JSON "sales"
 try:
     from llm_json import json as llmjson  # type: ignore
 except Exception:
@@ -59,6 +21,10 @@ except Exception:
 import json as stdjson
 
 
+# =========================
+# LABEL SCHEMA
+# =========================
+
 EXPECTED_KEYS = [
     "fracture_visible",
     "deplacement_ou_incongruence",
@@ -66,14 +32,50 @@ EXPECTED_KEYS = [
     "materiel_implant",
     "osteotomie_ou_arthrodese",
 ]
-
 ALLOWED_VALUES = {"oui", "non", "inconnu"}
 
 
-def normalize_keys(data: dict) -> dict:
+# =========================
+# MODEL PROFILES
+# =========================
+# Ajout d’un modèle = ajouter une entrée ici.
+MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
+    "ministral3_3b": {
+        "model_name": "unsloth/Ministral-3-3B-Instruct-2512-FP8",
+        "llm_kwargs": {
+            "max_model_len": 4096,
+        },
+        "sampling_defaults": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_tokens": 512,
+        },
+        "batch_size": 64,
+    },
+    "qwen3_4b_fp8": {
+        "model_name": "Qwen/Qwen3-4B-Instruct-2507-FP8",
+        "llm_kwargs": {
+            "max_model_len": 4096,
+            "max_num_seqs": 64,  # spécifique à ton script qwen
+        },
+        "sampling_defaults": {
+            "temperature": 0.0,
+            "top_p": 1.0,
+            "max_tokens": 512,
+        },
+        "batch_size": 64,
+    },
+}
+
+
+# =========================
+# NORMALIZATION + JSON PARSING
+# =========================
+
+def normalize_keys(data: dict) -> Dict[str, str]:
     corrected: Dict[str, str] = {}
 
-    # 1) corriger/aligner les clés
+    # 1) corriger/aligner les clés existantes
     for key, value in data.items():
         if not isinstance(key, str):
             continue
@@ -105,39 +107,34 @@ def normalize_keys(data: dict) -> dict:
 def extract_json_object(text: str) -> Optional[str]:
     """
     Extrait le premier bloc JSON { ... } trouvé dans le texte.
-    Version non-gourmande pour éviter de capturer trop large.
+    Non-gourmand (.*?), pour éviter d'englober trop large.
     """
     if not text:
         return None
-    match = re.search(r"\{.*?\}", text, re.DOTALL)
-    if match:
-        return match.group(0)
-    return None
+    m = re.search(r"\{.*?\}", text, flags=re.DOTALL)
+    return m.group(0) if m else None
 
 
 def parse_json_best_effort(json_str: str) -> Optional[dict]:
-    """
-    Essaie de parser un JSON. D'abord llm_json si dispo, sinon stdlib json.
-    """
     if not json_str:
         return None
 
-    # Essai llm_json
     if llmjson is not None:
         try:
-            return llmjson.loads(json_str)
+            obj = llmjson.loads(json_str)
+            return obj if isinstance(obj, dict) else None
         except Exception:
             pass
 
-    # Essai stdlib
     try:
-        return stdjson.loads(json_str)
+        obj = stdjson.loads(json_str)
+        return obj if isinstance(obj, dict) else None
     except Exception:
         return None
 
 
 # =========================
-# PROMPT TEMPLATE
+# PROMPT
 # =========================
 
 def build_prompt(report_text: str) -> str:
@@ -177,6 +174,7 @@ DÉFINITIONS / RÈGLES DE CODAGE :
 - materiel_implant = "oui" si vis/plaque/broche/agrafes/clou/prothèse/ancres/fixateur externe ; sinon "non" ; "inconnu" si non mentionné ou ambigu.
 - osteotomie_ou_arthrodese = "oui" si ostéotomie ou arthrodèse mentionnée/compatible ; "non" sinon ; "inconnu" si non mentionné ou ambigu.
 
+
 Format EXACT attendu :
 
 {{
@@ -191,26 +189,22 @@ TEXTE :
 \"\"\"
 {report_text}
 \"\"\"
-""".strip()
+"""
 
 
 # =========================
 # SPLITS / SELECTION
 # =========================
 
-def load_report_ids_from_split_csv(path: Path) -> Set[str]:
-    """
-    Lit un CSV type splits/*_exams.csv contenant une colonne 'report_id'.
-    """
+def load_report_ids_from_csv(path: Path) -> Set[str]:
     if not path.exists():
-        raise FileNotFoundError(f"Split CSV introuvable: {path}")
+        raise FileNotFoundError(f"CSV introuvable: {path}")
 
     report_ids: Set[str] = set()
     with path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         if not reader.fieldnames or "report_id" not in reader.fieldnames:
             raise ValueError(f"Le CSV {path} ne contient pas de colonne 'report_id'.")
-
         for row in reader:
             rid = (row.get("report_id") or "").strip()
             if rid:
@@ -219,51 +213,34 @@ def load_report_ids_from_split_csv(path: Path) -> Set[str]:
 
 
 def load_report_ids_from_splits_dir(splits_dir: Path, splits: Sequence[str]) -> Set[str]:
-    """
-    Charge report_id depuis splits_dir/{split}_exams.csv pour split in {train,val,test}.
-    """
     all_ids: Set[str] = set()
     for s in splits:
         s = s.strip().lower()
         if s not in {"train", "val", "test"}:
             raise ValueError(f"Split invalide: {s} (attendu: train/val/test)")
-
         p = splits_dir / f"{s}_exams.csv"
-        ids = load_report_ids_from_split_csv(p)
-        all_ids |= ids
+        all_ids |= load_report_ids_from_csv(p)
     return all_ids
 
 
 def select_txt_files(input_dir: Path, report_ids: Optional[Set[str]] = None) -> Tuple[List[Path], List[str]]:
-    """
-    Retourne les paths .txt + la liste de report_id correspondante.
-    Si report_ids est fourni, filtre strictement sur ces IDs.
-    """
     txt_files = sorted(input_dir.glob("*.txt"))
 
     if report_ids is None:
-        file_ids = [p.stem for p in txt_files]
-        return txt_files, file_ids
+        return txt_files, [p.stem for p in txt_files]
 
     filtered_files: List[Path] = []
     filtered_ids: List[str] = []
     for p in txt_files:
-        rid = p.stem
-        if rid in report_ids:
+        if p.stem in report_ids:
             filtered_files.append(p)
-            filtered_ids.append(rid)
-
+            filtered_ids.append(p.stem)
     return filtered_files, filtered_ids
 
 
 # =========================
-# INFERENCE
+# GENERATION
 # =========================
-
-def batched(iterable: Sequence, batch_size: int):
-    for i in range(0, len(iterable), batch_size):
-        yield iterable[i : i + batch_size]
-
 
 def run_generation(
     llm: LLM,
@@ -272,9 +249,6 @@ def run_generation(
     file_ids: List[str],
     batch_size: int = 64,
 ) -> List[Dict[str, str]]:
-    """
-    Génère et parse les sorties en batchs, retourne une liste de dicts (incluant report_id).
-    """
     results: List[Dict[str, str]] = []
 
     n = len(prompts)
@@ -285,9 +259,9 @@ def run_generation(
 
         outputs = llm.generate(prompts_b, sampling_params)
 
-        for i, output in enumerate(outputs):
+        for i, out in enumerate(outputs):
             rid = ids_b[i]
-            generated_text = output.outputs[0].text if output.outputs else ""
+            generated_text = out.outputs[0].text if out.outputs else ""
 
             json_str = extract_json_object(generated_text)
             if json_str is None:
@@ -295,13 +269,13 @@ def run_generation(
                 continue
 
             data = parse_json_best_effort(json_str)
-            if data is None or not isinstance(data, dict):
+            if data is None:
                 print(f"⚠ JSON invalide pour {rid}")
                 continue
 
-            data = normalize_keys(data)
-            data["report_id"] = rid
-            results.append(data)
+            data_norm = normalize_keys(data)
+            data_norm["report_id"] = rid
+            results.append(data_norm)
 
     return results
 
@@ -325,46 +299,35 @@ def export_csv(results: List[Dict[str, str]], output_csv: Path) -> None:
 def parse_args():
     p = argparse.ArgumentParser("Generate pseudo-labels from radiology reports")
 
-    p.add_argument("--input_dir", type=Path, required=True, help="Dossier contenant les .txt (un fichier = un report_id).")
-    p.add_argument("--output_csv", type=Path, required=True, help="CSV de sortie (report_id en 1ère colonne).")
+    p.add_argument("--input_dir", type=Path, required=True)
+    p.add_argument("--output_csv", type=Path, required=True)
 
+    p.add_argument(
+        "--profile",
+        type=str,
+        required=True,
+        choices=sorted(MODEL_PROFILES.keys()),
+        help="Profil modèle (définit model_name + llm_kwargs + sampling defaults).",
+    )
     p.add_argument(
         "--model_name",
         type=str,
-        default="mistralai/Ministral-3-3B-Instruct-2512",
-        help="Nom du modèle vLLM.",
-    )
-    p.add_argument("--max_model_len", type=int, default=4096, help="max_model_len pour vLLM.")
-    p.add_argument("--temperature", type=float, default=0.0)
-    p.add_argument("--top_p", type=float, default=1.0)
-    p.add_argument("--max_tokens", type=int, default=512)
-
-    p.add_argument(
-        "--batch_size",
-        type=int,
-        default=64,
-        help="Batching niveau 'prompts' (pas le batch GPU interne de vLLM).",
+        default=None,
+        help="Optionnel: override du model_name du profil.",
     )
 
-    # Modes de sélection
-    p.add_argument(
-        "--splits_dir",
-        type=Path,
-        default=None,
-        help="Dossier contenant train_exams.csv / val_exams.csv / test_exams.csv.",
-    )
-    p.add_argument(
-        "--use_splits",
-        nargs="*",
-        default=None,
-        help="Liste de splits à inclure (ex: val test). Requiert --splits_dir.",
-    )
-    p.add_argument(
-        "--report_ids_csv",
-        type=Path,
-        default=None,
-        help="CSV contenant une colonne report_id (ex: splits/val_exams.csv).",
-    )
+    # overrides sampling
+    p.add_argument("--temperature", type=float, default=None)
+    p.add_argument("--top_p", type=float, default=None)
+    p.add_argument("--max_tokens", type=int, default=None)
+
+    # overrides runtime
+    p.add_argument("--batch_size", type=int, default=None)
+
+    # selection mode
+    p.add_argument("--splits_dir", type=Path, default=None)
+    p.add_argument("--use_splits", nargs="*", default=None, help="ex: val test")
+    p.add_argument("--report_ids_csv", type=Path, default=None, help="CSV avec colonne report_id")
 
     return p.parse_args()
 
@@ -375,11 +338,22 @@ def main():
     if not args.input_dir.exists():
         raise FileNotFoundError(f"input_dir introuvable: {args.input_dir}")
 
-    # 1) Déterminer la liste de report_id à traiter (optionnel)
+    prof = MODEL_PROFILES[args.profile]
+    model_name = args.model_name or prof["model_name"]
+    llm_kwargs = dict(prof.get("llm_kwargs", {}))
+
+    sampling_defaults = dict(prof.get("sampling_defaults", {}))
+    temperature = sampling_defaults["temperature"] if args.temperature is None else args.temperature
+    top_p = sampling_defaults["top_p"] if args.top_p is None else args.top_p
+    max_tokens = sampling_defaults["max_tokens"] if args.max_tokens is None else args.max_tokens
+
+    batch_size = prof.get("batch_size", 64) if args.batch_size is None else args.batch_size
+
+    # 1) selection IDs
     report_ids: Optional[Set[str]] = None
 
     if args.report_ids_csv is not None:
-        report_ids = load_report_ids_from_split_csv(args.report_ids_csv)
+        report_ids = load_report_ids_from_csv(args.report_ids_csv)
 
     if args.use_splits is not None and len(args.use_splits) > 0:
         if args.splits_dir is None:
@@ -387,67 +361,66 @@ def main():
         ids_from_splits = load_report_ids_from_splits_dir(args.splits_dir, args.use_splits)
         report_ids = ids_from_splits if report_ids is None else (report_ids | ids_from_splits)
 
-    # 2) Sélection des fichiers .txt
+    # 2) select files
     txt_files, file_ids = select_txt_files(args.input_dir, report_ids=report_ids)
 
-    # Stats sélection
     n_all = len(list(args.input_dir.glob("*.txt")))
     n_sel = len(txt_files)
 
-    print(f"📁 input_dir: {args.input_dir}")
+    print("======================================")
+    print(f"📁 input_dir:  {args.input_dir}")
     print(f"🧾 .txt total: {n_all}")
     if report_ids is None:
         print("🎯 mode: FULL DATASET (tous les .txt)")
     else:
-        print(f"🎯 mode: SUBSET (filtré) | report_ids demandés: {len(report_ids)} | .txt matchés: {n_sel}")
-
-        # Identifie les IDs demandés mais absents en .txt
-        existing_ids = {p.stem for p in args.input_dir.glob('*.txt')}
-        missing = sorted(list(report_ids - existing_ids))
+        print(f"🎯 mode: SUBSET | report_ids demandés: {len(report_ids)} | .txt matchés: {n_sel}")
+        existing = {p.stem for p in args.input_dir.glob("*.txt")}
+        missing = sorted(list(report_ids - existing))
         if missing:
-            print(f"⚠ report_id demandés mais sans fichier .txt correspondant: {len(missing)}")
-            print("   (exemples) " + ", ".join(missing[:10]))
+            print(f"⚠ report_id demandés mais sans .txt: {len(missing)} (ex: {', '.join(missing[:10])})")
 
     if n_sel == 0:
         print("❌ Aucun fichier à traiter après filtrage.")
         return
 
-    # 3) Construire prompts
+    # 3) prompts
     prompts: List[str] = []
     for pth in txt_files:
         text = pth.read_text(encoding="utf-8")
         prompts.append(build_prompt(text))
 
-    # 4) Init vLLM
+    # 4) vLLM init
     sampling_params = SamplingParams(
-        temperature=args.temperature,
-        top_p=args.top_p,
-        max_tokens=args.max_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_tokens,
     )
 
-    llm = LLM(
-        model=args.model_name,
-        max_model_len=args.max_model_len,
-    )
+    llm = LLM(model=model_name, **llm_kwargs)
 
-    # 5) Génération
-    print(f"🤖 modèle: {args.model_name}")
-    print(f"🚀 génération: n={len(prompts)} | batch_size={args.batch_size} | temp={args.temperature} | top_p={args.top_p}")
+    print("======================================")
+    print(f"🤖 profile:    {args.profile}")
+    print(f"🤖 model_name:  {model_name}")
+    print(f"⚙️ llm_kwargs:  {llm_kwargs}")
+    print(f"⚙️ sampling:    temp={temperature} top_p={top_p} max_tokens={max_tokens}")
+    print(f"🚀 n={len(prompts)} | batch_size={batch_size}")
+    print("======================================")
 
+    # 5) generation
     results = run_generation(
         llm=llm,
         sampling_params=sampling_params,
         prompts=prompts,
         file_ids=file_ids,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
     )
 
-    # 6) Export
+    # 6) export
     if results:
         export_csv(results, args.output_csv)
         print(f"✅ lignes exportées: {len(results)} / {len(prompts)}")
     else:
-        print("❌ Aucun résultat exporté (tous les JSON étaient invalides ou absents).")
+        print("❌ Aucun résultat exporté (JSON invalides/absents).")
 
 
 if __name__ == "__main__":
