@@ -438,7 +438,12 @@ def cb_prev(state: dict):
 # -----------------------------
 # UI GRADIO
 # -----------------------------
-with gr.Blocks(title="FA Manual Annotation Tool") as demo:
+
+css = '''
+#rapport {font-size: 22px !important;}
+'''
+
+with gr.Blocks(title="FA Manual Annotation Tool", css=css) as demo:
     gr.Markdown("## Outil d’annotation manuelle (val / test / val+test)")
 
     with gr.Row():
@@ -463,7 +468,7 @@ with gr.Blocks(title="FA Manual Annotation Tool") as demo:
     status_md = gr.Markdown("Status: clique sur **Start / Reload**.")
 
     with gr.Row():
-        report_text = gr.Textbox(label="Rapport (.txt)", lines=16, interactive=False)
+        report_text = gr.Textbox(label="Rapport (.txt)", lines=16, interactive=False, elem_classes="rapport", elem_id="rapport")
         gallery = gr.Gallery(
             label="Images de l’examen",
             columns=2,
@@ -477,10 +482,10 @@ with gr.Blocks(title="FA Manual Annotation Tool") as demo:
 
     with gr.Row():
         fracture_visible = gr.Radio(LABEL_CHOICES, value=None, label="fracture", scale=1)
-        deplacement_ou_incongruence = gr.Radio(LABEL_CHOICES, value=None, label="dépl./incong.", scale=1)
-        consolidation_ou_reaction_periostee = gr.Radio(LABEL_CHOICES, value=None, label="consol./périoste", scale=1)
+        deplacement_ou_incongruence = gr.Radio(LABEL_CHOICES, value=None, label="déplacement/incongruence", scale=1)
+        consolidation_ou_reaction_periostee = gr.Radio(LABEL_CHOICES, value=None, label="consolidation/apposition périoste", scale=1)
         materiel_implant = gr.Radio(LABEL_CHOICES, value=None, label="matériel", scale=1)
-        osteotomie_ou_arthrodese = gr.Radio(LABEL_CHOICES, value=None, label="ostéo/arthro", scale=1)
+        osteotomie_ou_arthrodese = gr.Radio(LABEL_CHOICES, value=None, label="ostéosynthèse/arthrodèse", scale=1)
         btn_save_next = gr.Button("Save & Next", variant="primary", scale=1)
 
     with gr.Row():
